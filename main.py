@@ -127,7 +127,7 @@ async def handle_participate(chat_id: int):
                 supabase.table("users").update({"valid_referrals": new_count}).eq("user_id", current_user["referred_by"]).execute()
 
         # Send Referral Link
-        ref_link = f"https://t.me/YOUR_BOT_USERNAME?start={chat_id}"
+        ref_link = f"https://t.me/PrizeLedgerBot?start={chat_id}"
         await send_telegram_message(chat_id, f"🎉 *You are in!*\n\nYour Referral Link:\n`{ref_link}`\n\nShare this to climb the leaderboard!")
 
 # --- API Endpoints ---
