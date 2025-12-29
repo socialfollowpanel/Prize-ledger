@@ -11,7 +11,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID") 
 CURRENT_SEASON = "Season 2"
-BOT_USERNAME = os.getenv("BOT_USERNAME", "YourBot") # Add your bot username here
+BOT_USERNAME = os.getenv("BOT_USERNAME", "PrizeLedgerBot") # Add your bot username here
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
