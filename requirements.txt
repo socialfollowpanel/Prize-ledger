@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+supabase
+httpx
+pydantic
+python-multipart
