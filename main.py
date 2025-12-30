@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from supabase import create_client, Client
 from pydantic import BaseModel
-from google import genai  # UPDATED: Changed to match 'google-genai' package
+from google import genai 
 
 # --- Configuration ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -20,7 +20,7 @@ CURRENT_SEASON = "Season 2"
 BOT_USERNAME = os.getenv("BOT_USERNAME", "PrizeLedgerBot")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6950876107"))
 
-# Setup Gemini (UPDATED: New SDK Client setup)
+# Setup Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -75,7 +75,7 @@ def get_season_status():
     now = datetime.now(timezone.utc)
     return season["is_active"] and now < end_date
 
-# --- AI BROADCAST LOGIC (NEW) ---
+# --- AI BROADCAST LOGIC ---
 
 async def generate_ai_broadcast_message(season_name: str, days_remaining: int):
     emoji_pool = ["🚀", "⏳", "🔥", "🎯", "💰", "📈", "⚡", "🏆", "🔔", "🎁"]
@@ -101,7 +101,6 @@ Output:
 Return ONLY the message content in HTML."""
 
     for _ in range(3): # Try up to 3 times to get a unique message
-        # UPDATED: Changed model to gemini-2.5-flash as requested
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
@@ -194,6 +193,16 @@ def get_confirm_broadcast_keyboard():
         "inline_keyboard": [
             [{"text": "✅ Send to All Users", "callback_data": "bc_confirm_send"}],
             [{"text": "❌ Cancel", "callback_data": "bc_cancel"}]
+        ]
+    }
+
+def get_share_button(ref_link):
+    share_text = f"Join {CURRENT_SEASON} and win big prizes! 🚀"
+    # Create the telegram share url
+    share_url = f"https://t.me/share/url?url={ref_link}&text={share_text}"
+    return {
+        "inline_keyboard": [
+            [{"text": "🚀 Share Link", "url": share_url}]
         ]
     }
 
@@ -319,8 +328,11 @@ async def handle_participate(chat_id: int):
             if ref_data.data:
                 new_count = ref_data.data[0]["valid_referrals"] + 1
                 supabase.table("users").update({"valid_referrals": new_count}).eq("user_id", current_user["referred_by"]).execute()
+    
     ref_link = f"https://t.me/{BOT_USERNAME}?start={chat_id}"
-    await send_telegram_message(chat_id, f"✅ *You are now participating!*\n\n🔗 *Your Referral Link:*\n`{ref_link}`", get_main_menu_keyboard())
+    # UPDATED: Added Share Button
+    await send_telegram_message(chat_id, f"✅ *You are now participating!*\n\n🔗 *Your Referral Link:*\n`{ref_link}`", get_share_button(ref_link))
+    await send_telegram_message(chat_id, "Use the menu below to track your progress.", get_main_menu_keyboard())
 
 async def handle_stats_request(chat_id: int, request_type: str):
     if request_type == "referrals":
@@ -328,11 +340,39 @@ async def handle_stats_request(chat_id: int, request_type: str):
         if user.data:
             count = user.data[0]['valid_referrals']
             ref_link = f"https://t.me/{BOT_USERNAME}?start={chat_id}"
-            await send_telegram_message(chat_id, f"🔗 *Your Referral Link:*\n`{ref_link}`\n\n👥 *Valid Referrals:* {count}")
+            # UPDATED: Added Share Button
+            await send_telegram_message(chat_id, f"🔗 *Your Referral Link:*\n`{ref_link}`\n\n👥 *Valid Referrals:* {count}", get_share_button(ref_link))
+            
     elif request_type == "leaderboard":
-        res = supabase.table("users").select("username,valid_referrals").eq("is_participating", True).eq("season", CURRENT_SEASON).order("valid_referrals", desc=True).limit(5).execute()
-        board = "\n".join([f"{i+1}. {u['username']}: {u['valid_referrals']}" for i, u in enumerate(res.data)])
-        await send_telegram_message(chat_id, f"🏆 *Leaderboard*\n\n{board}")
+        # UPDATED: Now fetching user_id to make links and formatting medals/crowns
+        res = supabase.table("users").select("user_id,username,valid_referrals").eq("is_participating", True).eq("season", CURRENT_SEASON).order("valid_referrals", desc=True).limit(10).execute()
+        
+        board_lines = []
+        for i, u in enumerate(res.data):
+            rank = i + 1
+            # Add Medals and King/Crown
+            if rank == 1:
+                prefix = "🥇 👑" 
+            elif rank == 2:
+                prefix = "🥈"
+            elif rank == 3:
+                prefix = "🥉"
+            else:
+                prefix = f"<b>{rank}.</b>"
+            
+            # Formatting name as clickable link
+            name = u.get("username", "Unknown") or "Unknown"
+            # Sanitize name for HTML
+            name = name.replace("<", "&lt;").replace(">", "&gt;")
+            
+            user_link = f"<a href='tg://user?id={u['user_id']}'>{name}</a>"
+            
+            board_lines.append(f"{prefix} {user_link} : <b>{u['valid_referrals']}</b>")
+        
+        board_text = "\n".join(board_lines) if board_lines else "No participants yet."
+        # Using HTML parse mode for the link to work
+        await send_telegram_message(chat_id, f"🏆 <b>Leaderboard</b>\n\n{board_text}", parse_mode="HTML")
+        
     elif request_type == "stats":
         user = supabase.table("users").select("*").eq("user_id", chat_id).execute()
         if user.data:
