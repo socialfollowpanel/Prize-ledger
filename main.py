@@ -13,7 +13,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID") 
 CURRENT_SEASON = "Season 2"
 BOT_USERNAME = os.getenv("BOT_USERNAME", "PrizeLedgerBot") 
-ADMIN_ID = int(os.getenv("ADMIN_ID", "6950876107")) # REPLACE WITH YOUR TELEGRAM ID
+ADMIN_ID = int(os.getenv("ADMIN_ID", "6950876107")) 
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
@@ -24,11 +24,28 @@ broadcast_state = {}
 
 # --- Helpers ---
 
-async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = None):
+async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = None) -> int:
+    """Sends a message and returns the message_id."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, json=payload)
+        data = resp.json()
+        if data.get("ok"):
+            return data["result"]["message_id"]
+        return None
+
+async def edit_telegram_message(chat_id: int, message_id: int, text: str):
+    """Edits an existing message text (used for loading animation)."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+    payload = {
+        "chat_id": chat_id, 
+        "message_id": message_id, 
+        "text": text, 
+        "parse_mode": "Markdown"
+    }
     async with httpx.AsyncClient() as client:
         await client.post(url, json=payload)
 
@@ -106,6 +123,7 @@ async def handle_broadcast_command(chat_id: int):
     if chat_id != ADMIN_ID:
         return # Silent fail for non-admins
     
+    # Initialize state
     broadcast_state[chat_id] = {"step": "selecting_type", "data": {}}
     await send_telegram_message(chat_id, "📢 *Broadcast Menu*\n\nSelect the type of message you want to send:", get_broadcast_type_keyboard())
 
@@ -179,31 +197,40 @@ async def execute_broadcast(admin_id: int):
     data = state["data"]
     bc_type = state.get("type")
     
-    # 1. Fetch Users (From Supabase - easy fetching)
-    # We fetch all user_ids. Supabase limits rows, so we might need pagination for huge lists, 
-    # but for simplicity we fetch a large batch here.
+    # 1. Fetch Users
     users = supabase.table("users").select("user_id").execute()
     user_list = [u["user_id"] for u in users.data]
+    total_users = len(user_list)
     
-    await send_telegram_message(admin_id, f"🚀 Starting broadcast to {len(user_list)} users...")
+    # 2. Send Initial Loading Message
+    progress_msg_id = await send_telegram_message(admin_id, f"🚀 **Broadcasting...**\n\nSent: 0 / {total_users}")
     
     success_count = 0
     fail_count = 0
     
-    # 2. Loop and Send
-    for uid in user_list:
+    # 3. Loop and Send with Progress Update
+    for i, uid in enumerate(user_list):
         try:
             if bc_type == "photo":
                 await send_telegram_photo(uid, data["photo_id"], data["caption"], data["markup"])
             else:
                 await send_telegram_message(uid, data["text"], data["markup"])
             success_count += 1
-            await asyncio.sleep(0.05) # Rate limiting prevention
+            
+            # Slow down slightly to avoid Telegram limits
+            await asyncio.sleep(0.05) 
+            
+            # Update Admin Progress every 5 users (to avoid hitting rate limits on editing)
+            if progress_msg_id and (i + 1) % 5 == 0:
+                await edit_telegram_message(admin_id, progress_msg_id, f"🚀 **Broadcasting...**\n\nSent: {i + 1} / {total_users}\nSuccess: {success_count}\nFailed: {fail_count}")
+                
         except Exception:
             fail_count += 1
             continue
             
-    await send_telegram_message(admin_id, f"✅ Broadcast Complete!\n\nSent: {success_count}\nFailed: {fail_count}")
+    # Final Status Update
+    if progress_msg_id:
+        await edit_telegram_message(admin_id, progress_msg_id, f"✅ **Broadcast Complete!**\n\nTotal: {total_users}\nSuccess: {success_count}\nFailed: {fail_count}")
     
     # Clear state
     del broadcast_state[admin_id]
@@ -341,8 +368,13 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     if "callback_query" in data:
         cb = data["callback_query"]
         chat_id = cb["message"]["chat"]["id"]
+        message_id = cb["message"]["message_id"]
         data_cb = cb["data"]
         
+        # --- DELETE OLD BUTTONS LOGIC ---
+        # We delete the message that was clicked to keep chat clean
+        background_tasks.add_task(delete_telegram_message, chat_id, message_id)
+
         # --- BROADCAST CALLBACKS ---
         if data_cb == "bc_type_photo":
             broadcast_state[chat_id]["step"] = "waiting_for_photo"
@@ -355,8 +387,8 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             await send_telegram_message(chat_id, "📝 **Broadcast Mode: Text**\n\nPlease send the MESSAGE TEXT you want to broadcast.\n\nTo add a button, add a new line at the end:\n`Button Text | https://link.com`")
 
         elif data_cb == "bc_confirm_send":
+            # Start the broadcast loop in background
             background_tasks.add_task(execute_broadcast, chat_id)
-            await send_telegram_message(chat_id, "⏳ Sending broadcast... do not send other commands until finished.")
         
         elif data_cb == "bc_cancel":
             if chat_id in broadcast_state:
@@ -365,12 +397,11 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 
         # --- EXISTING CALLBACKS ---
         elif data_cb == "participate":
-            background_tasks.add_task(delete_telegram_message, chat_id, cb["message"]["message_id"])
             background_tasks.add_task(handle_participate, chat_id)
         
         elif data_cb == "check_join":
             username = cb["from"].get("username", "Unknown")
-            background_tasks.add_task(handle_start, chat_id, username, "", cb["message"]["message_id"])
+            background_tasks.add_task(handle_start, chat_id, username, "", message_id)
             
         return {"status": "ok"}
 
