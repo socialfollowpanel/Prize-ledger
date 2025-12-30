@@ -7,7 +7,15 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from supabase import create_client, Client
 from pydantic import BaseModel
-import google.genai as genai  # Added for Gemini
+
+# --- Fix for ModuleNotFoundError ---
+# We try to import the library. If it is missing (due to requirements mismatch),
+# we set it to None so the bot does not crash on startup.
+try:
+    import google.generativeai as genai  # Added for Gemini
+except ImportError:
+    genai = None
+    print("WARNING: 'google.generativeai' not found. Check requirements.txt contains 'google-generativeai'.")
 
 # --- Configuration ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -20,9 +28,14 @@ CURRENT_SEASON = "Season 2"
 BOT_USERNAME = os.getenv("BOT_USERNAME", "PrizeLedgerBot")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6950876107"))
 
-# Setup Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash-001')
+# Setup Gemini (Safe Initialization)
+model = None
+if genai and GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-2.0-flash-001')
+    except Exception as e:
+        print(f"Error configuring Gemini: {e}")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
@@ -79,6 +92,11 @@ def get_season_status():
 # --- AI BROADCAST LOGIC (NEW) ---
 
 async def generate_ai_broadcast_message(season_name: str, days_remaining: int):
+    # Safety Check: If model didn't load, return None
+    if not model:
+        print("Gemini model not active. Skipping AI generation.")
+        return None
+
     emoji_pool = ["🚀", "⏳", "🔥", "🎯", "💰", "📈", "⚡", "🏆", "🔔", "🎁"]
     selected_emojis = ", ".join(random.sample(emoji_pool, k=random.randint(2, 4)))
     
@@ -102,20 +120,24 @@ Output:
 Return ONLY the message content in HTML."""
 
     for _ in range(3): # Try up to 3 times to get a unique message
-        response = model.generate_content(prompt)
-        message_text = response.text.strip()
-        
-        # Duplicate Prevention check
-        message_hash = hashlib.sha256(message_text.encode()).hexdigest()
-        existing = supabase.table("ai_messages_log").select("id").eq("message_hash", message_hash).execute()
-        
-        if not existing.data:
-            # Save hash and return
-            supabase.table("ai_messages_log").insert({
-                "season_id": season_name,
-                "message_hash": message_hash
-            }).execute()
-            return message_text
+        try:
+            response = model.generate_content(prompt)
+            message_text = response.text.strip()
+            
+            # Duplicate Prevention check
+            message_hash = hashlib.sha256(message_text.encode()).hexdigest()
+            existing = supabase.table("ai_messages_log").select("id").eq("message_hash", message_hash).execute()
+            
+            if not existing.data:
+                # Save hash and return
+                supabase.table("ai_messages_log").insert({
+                    "season_id": season_name,
+                    "message_hash": message_hash
+                }).execute()
+                return message_text
+        except Exception as e:
+            print(f"Error generating content: {e}")
+            continue
             
     return None
 
@@ -133,7 +155,7 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
     # 2. Generate AI Message
     broadcast_html = await generate_ai_broadcast_message(season["season_name"], days_remaining)
     if not broadcast_html:
-        return {"status": "Failed to generate unique message"}
+        return {"status": "Failed to generate unique message or AI unavailable"}
 
     # 3. Determine Targets
     targets = []
