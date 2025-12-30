@@ -400,14 +400,20 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     return {"status": "ok"}
 
 @app.get("/validate-users")
-async def validate_users_cron():
+async def validate_users_cron(background_tasks: BackgroundTasks):
     if not get_season_status(): return {"status": "Season ended"}
     users = supabase.table("users").select("user_id, referred_by").eq("is_participating", True).limit(50).execute()
     for user in users.data:
         if not await check_membership(user["user_id"]):
+            # DB Updates: Mark inactive and decrease referral count
             supabase.table("users").update({"is_participating": False}).eq("user_id", user["user_id"]).execute()
             if user["referred_by"]:
                 ref_data = supabase.table("users").select("valid_referrals").eq("user_id", user["referred_by"]).execute()
                 if ref_data.data and ref_data.data[0]["valid_referrals"] > 0:
                     supabase.table("users").update({"valid_referrals": ref_data.data[0]["valid_referrals"] - 1}).eq("user_id", user["referred_by"]).execute()
+            
+            # Send Notification Message
+            msg = f"❌ <b>You are no longer participating in {CURRENT_SEASON}</b>\n\n<b>Reason:</b> You left the required channel.\n\nJoin back and participate again — everything will come back!"
+            background_tasks.add_task(send_telegram_message, user["user_id"], msg, None, "HTML")
+
     return {"status": "success"}
