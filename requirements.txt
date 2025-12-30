@@ -4,3 +4,4 @@ supabase
 httpx
 pydantic
 python-multipart
+google-generativeai
