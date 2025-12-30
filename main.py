@@ -101,9 +101,9 @@ Output:
 Return ONLY the message content in HTML."""
 
     for _ in range(3): # Try up to 3 times to get a unique message
-        # UPDATED: New SDK syntax for generation
+        # UPDATED: Changed model to gemini-2.5-flash as requested
         response = client.models.generate_content(
-            model='gemini-2.0-flash-001',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         message_text = response.text.strip()
