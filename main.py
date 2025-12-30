@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from supabase import create_client, Client
 from pydantic import BaseModel
-import google.generativeai as genai  # Added for Gemini
+import google.genai as genai  # Added for Gemini
 
 # --- Configuration ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
