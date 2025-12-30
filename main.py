@@ -1,5 +1,6 @@
 import os
 import httpx
+import asyncio
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from supabase import create_client, Client
@@ -11,16 +12,31 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID") 
 CURRENT_SEASON = "Season 2"
-BOT_USERNAME = os.getenv("BOT_USERNAME", "PrizeLedgerBot") # Add your bot username here
+BOT_USERNAME = os.getenv("BOT_USERNAME", "PrizeLedgerBot") 
+ADMIN_ID = int(os.getenv("ADMIN_ID", "6950876107")) # REPLACE WITH YOUR TELEGRAM ID
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
+
+# --- Global State for Broadcast Wizard ---
+# Structure: {user_id: {"step": "waiting_for_photo", "data": {...}}}
+broadcast_state = {}
 
 # --- Helpers ---
 
 async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    async with httpx.AsyncClient() as client:
+        await client.post(url, json=payload)
+
+async def send_telegram_photo(chat_id: int, photo_id: str, caption: str = None, reply_markup: dict = None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    payload = {"chat_id": chat_id, "photo": photo_id, "parse_mode": "Markdown"}
+    if caption:
+        payload["caption"] = caption
     if reply_markup:
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient() as client:
@@ -66,6 +82,131 @@ def get_main_menu_keyboard():
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
+
+def get_broadcast_type_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "📸 Photo + Caption", "callback_data": "bc_type_photo"}],
+            [{"text": "📝 Text Only", "callback_data": "bc_type_text"}],
+            [{"text": "❌ Cancel", "callback_data": "bc_cancel"}]
+        ]
+    }
+
+def get_confirm_broadcast_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "✅ Send to All Users", "callback_data": "bc_confirm_send"}],
+            [{"text": "❌ Cancel", "callback_data": "bc_cancel"}]
+        ]
+    }
+
+# --- Broadcast Logic ---
+
+async def handle_broadcast_command(chat_id: int):
+    if chat_id != ADMIN_ID:
+        return # Silent fail for non-admins
+    
+    broadcast_state[chat_id] = {"step": "selecting_type", "data": {}}
+    await send_telegram_message(chat_id, "📢 *Broadcast Menu*\n\nSelect the type of message you want to send:", get_broadcast_type_keyboard())
+
+async def process_broadcast_step(chat_id: int, text: str = None, photo_id: str = None):
+    state = broadcast_state.get(chat_id)
+    if not state:
+        return
+
+    step = state["step"]
+    
+    # --- PHOTO FLOW ---
+    if step == "waiting_for_photo":
+        if not photo_id:
+            await send_telegram_message(chat_id, "⚠️ Please send a PHOTO for this broadcast.")
+            return
+        state["data"]["photo_id"] = photo_id
+        state["step"] = "waiting_for_caption"
+        await send_telegram_message(chat_id, "📸 Photo received.\n\nNow send the **Caption** for the photo (or type 'skip' for none).\n\nTo add a button, add a new line at the end:\n`Button Text | https://link.com`")
+    
+    elif step == "waiting_for_caption":
+        caption = text if text and text.lower() != "skip" else ""
+        
+        # Parse button if present in last line
+        button = None
+        if caption and "|" in caption.splitlines()[-1]:
+            lines = caption.splitlines()
+            btn_line = lines.pop()
+            btn_text, btn_url = btn_line.split("|", 1)
+            button = {"inline_keyboard": [[{"text": btn_text.strip(), "url": btn_url.strip()}]]}
+            caption = "\n".join(lines).strip()
+            
+        state["data"]["caption"] = caption
+        state["data"]["markup"] = button
+        state["step"] = "confirming"
+        
+        # Show Preview
+        await send_telegram_message(chat_id, "👀 *Preview:*")
+        await send_telegram_photo(chat_id, state["data"]["photo_id"], caption, button)
+        await send_telegram_message(chat_id, "Do you want to send this broadcast?", get_confirm_broadcast_keyboard())
+
+    # --- TEXT FLOW ---
+    elif step == "waiting_for_text":
+        if not text:
+            await send_telegram_message(chat_id, "⚠️ Please send TEXT.")
+            return
+            
+        # Parse button if present
+        button = None
+        msg_text = text
+        if "|" in text.splitlines()[-1]:
+            lines = text.splitlines()
+            btn_line = lines.pop()
+            btn_text, btn_url = btn_line.split("|", 1)
+            button = {"inline_keyboard": [[{"text": btn_text.strip(), "url": btn_url.strip()}]]}
+            msg_text = "\n".join(lines).strip()
+
+        state["data"]["text"] = msg_text
+        state["data"]["markup"] = button
+        state["step"] = "confirming"
+        
+        # Show Preview
+        await send_telegram_message(chat_id, "👀 *Preview:*")
+        await send_telegram_message(chat_id, msg_text, button)
+        await send_telegram_message(chat_id, "Do you want to send this broadcast?", get_confirm_broadcast_keyboard())
+
+async def execute_broadcast(admin_id: int):
+    state = broadcast_state.get(admin_id)
+    if not state or state["step"] != "confirming":
+        return
+
+    data = state["data"]
+    bc_type = state.get("type")
+    
+    # 1. Fetch Users (From Supabase - easy fetching)
+    # We fetch all user_ids. Supabase limits rows, so we might need pagination for huge lists, 
+    # but for simplicity we fetch a large batch here.
+    users = supabase.table("users").select("user_id").execute()
+    user_list = [u["user_id"] for u in users.data]
+    
+    await send_telegram_message(admin_id, f"🚀 Starting broadcast to {len(user_list)} users...")
+    
+    success_count = 0
+    fail_count = 0
+    
+    # 2. Loop and Send
+    for uid in user_list:
+        try:
+            if bc_type == "photo":
+                await send_telegram_photo(uid, data["photo_id"], data["caption"], data["markup"])
+            else:
+                await send_telegram_message(uid, data["text"], data["markup"])
+            success_count += 1
+            await asyncio.sleep(0.05) # Rate limiting prevention
+        except Exception:
+            fail_count += 1
+            continue
+            
+    await send_telegram_message(admin_id, f"✅ Broadcast Complete!\n\nSent: {success_count}\nFailed: {fail_count}")
+    
+    # Clear state
+    del broadcast_state[admin_id]
 
 # --- Bot Logic Handlers ---
 
@@ -200,14 +341,34 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     if "callback_query" in data:
         cb = data["callback_query"]
         chat_id = cb["message"]["chat"]["id"]
+        data_cb = cb["data"]
         
-        if cb["data"] == "participate":
-            # Delete the "Participate" message so they can't click it twice
+        # --- BROADCAST CALLBACKS ---
+        if data_cb == "bc_type_photo":
+            broadcast_state[chat_id]["step"] = "waiting_for_photo"
+            broadcast_state[chat_id]["type"] = "photo"
+            await send_telegram_message(chat_id, "📸 **Broadcast Mode: Photo**\n\nPlease send the PHOTO you want to broadcast now.")
+        
+        elif data_cb == "bc_type_text":
+            broadcast_state[chat_id]["step"] = "waiting_for_text"
+            broadcast_state[chat_id]["type"] = "text"
+            await send_telegram_message(chat_id, "📝 **Broadcast Mode: Text**\n\nPlease send the MESSAGE TEXT you want to broadcast.\n\nTo add a button, add a new line at the end:\n`Button Text | https://link.com`")
+
+        elif data_cb == "bc_confirm_send":
+            background_tasks.add_task(execute_broadcast, chat_id)
+            await send_telegram_message(chat_id, "⏳ Sending broadcast... do not send other commands until finished.")
+        
+        elif data_cb == "bc_cancel":
+            if chat_id in broadcast_state:
+                del broadcast_state[chat_id]
+            await send_telegram_message(chat_id, "❌ Broadcast cancelled.")
+
+        # --- EXISTING CALLBACKS ---
+        elif data_cb == "participate":
             background_tasks.add_task(delete_telegram_message, chat_id, cb["message"]["message_id"])
             background_tasks.add_task(handle_participate, chat_id)
         
-        elif cb["data"] == "check_join":
-            # Re-run start logic to check membership again
+        elif data_cb == "check_join":
             username = cb["from"].get("username", "Unknown")
             background_tasks.add_task(handle_start, chat_id, username, "", cb["message"]["message_id"])
             
@@ -221,9 +382,24 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         username = msg["from"].get("username", "Unknown")
         message_id = msg["message_id"]
 
+        # Check for Broadcast State (Is Admin inside a flow?)
+        if chat_id in broadcast_state:
+            # Check if it's a photo for broadcast
+            if "photo" in msg:
+                photo_id = msg["photo"][-1]["file_id"]
+                background_tasks.add_task(process_broadcast_step, chat_id, text=None, photo_id=photo_id)
+                return {"status": "ok"}
+            # Check if it's text for broadcast (or caption)
+            elif text and not text.startswith("/"):
+                background_tasks.add_task(process_broadcast_step, chat_id, text=text)
+                return {"status": "ok"}
+
         if text.startswith("/start"):
             args = text.split(" ")[1] if len(text.split(" ")) > 1 else ""
             background_tasks.add_task(handle_start, chat_id, username, args, message_id)
+        
+        elif text.startswith("/broadcast"):
+            background_tasks.add_task(handle_broadcast_command, chat_id)
         
         # Handle Keyboard Inputs
         elif text == "✅ My Referrals":
