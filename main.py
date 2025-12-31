@@ -33,9 +33,15 @@ broadcast_state = {}
 # --- Helpers ---
 async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = None, parse_mode: str = "Markdown"):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
+    payload = {"chat_id": chat_id, "text": text}
+    
+    # Only add parse_mode if it is provided (not None)
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+        
     if reply_markup:
         payload["reply_markup"] = reply_markup
+        
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, json=payload)
         return resp.json()
@@ -108,7 +114,7 @@ Use /start to check your stats."""
 # --- AI BROADCAST LOGIC ---
 
 async def generate_ai_broadcast_message(season_name: str, days_remaining: int):
-    # UPDATED PROMPT: Removed rigid emojis/brackets to fix duplication error
+    # UPDATED PROMPT: NO HTML, NO MARKDOWN. Plain Text Only.
     prompt = f"""You are a Telegram Community Manager writing a broadcast for "{season_name}".
     
     Context:
@@ -116,19 +122,20 @@ async def generate_ai_broadcast_message(season_name: str, days_remaining: int):
     - Goal: Motivate users to invite friends and check the leaderboard.
     
     Instructions:
-    1. Write a short, high-energy update using HTML tags (<b>, <i>, <u>) ONLY.
-    2. Do NOT use Markdown.
-    3. Include these 5 distinct sections (do not label them, just write them):
-       - A catchy Headline about the countdown (Make it bold).
+    1. Write a short, high-energy update using PLAIN TEXT ONLY.
+    2. Do NOT use HTML tags (No <b>, No <i>).
+    3. Do NOT use Markdown (No **bold**, No *italics*).
+    4. Include these 5 distinct sections (just write them naturally):
+       - A catchy Headline about the countdown (Use CAPS for emphasis instead of bold).
        - A punchy sentence stating exactly {days_remaining} days remain.
        - A Warning: Remind users that leaving the group voids their prize (Use an emoji like ⚠️ or ❌).
        - A Leaderboard Note: Mention that rankings are still shifting and every invite counts.
        - A Call to Action list (Stay active, Invite, Finish strong).
     
-    4. VARY your wording, sentence structure, and emoji choices every time you generate this.
-    5. Do NOT use placeholder text or brackets.
-    6. Do NOT include links.
-    7. Output ONLY the raw HTML string.
+    5. VARY your wording, sentence structure, and emoji choices every time you generate this.
+    6. Do NOT use placeholder text or brackets.
+    7. Do NOT include links.
+    8. Output ONLY the raw text message.
     """
 
     for _ in range(3): # Try up to 3 times to get a unique message
@@ -164,9 +171,9 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
     end_date = datetime.fromisoformat(season["end_date"].replace('Z', '+00:00'))
     days_remaining = (end_date - datetime.now(timezone.utc)).days
     
-    # 2. Generate AI Message
-    broadcast_html = await generate_ai_broadcast_message(season["season_name"], days_remaining)
-    if not broadcast_html:
+    # 2. Generate AI Message (Plain Text now)
+    broadcast_text = await generate_ai_broadcast_message(season["season_name"], days_remaining)
+    if not broadcast_text:
         return {"status": "Failed to generate unique message"}
 
     # 3. Determine Targets
@@ -180,9 +187,10 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
         targets.extend([g["chat_id"] for g in groups.data])
 
     # 4. Execute Sending (Background)
+    # The message is sent without preview, directly to the background task
     if targets:
-        background_tasks.add_task(run_broadcast_batch, targets, broadcast_html)
-        return {"status": "Broadcast started", "target_count": len(targets), "message_preview": broadcast_html[:100]}
+        background_tasks.add_task(run_broadcast_batch, targets, broadcast_text)
+        return {"status": "Broadcast initiated", "target_count": len(targets)}
     else:
         return {"status": "No targets found"}
 
@@ -194,7 +202,8 @@ async def run_broadcast_batch(targets, text):
     
     for chat_id in targets:
         try:
-            resp = await send_telegram_message(chat_id, text, parse_mode="HTML")
+            # Sending with parse_mode=None to handle RAW TEXT only (prevents HTML/Markdown errors)
+            resp = await send_telegram_message(chat_id, text, parse_mode=None)
             
             # Check response
             if resp.get("ok"):
@@ -216,8 +225,9 @@ async def run_broadcast_batch(targets, text):
                         print(f"Database update failed for {chat_id}: {db_error}")
                 
                 print(f"Failed to send to {chat_id}: {error_code} - {error_desc}")
-                
-            await asyncio.sleep(0.05) # Rate limiting
+            
+            # Small delay to respect Telegram limits (30 msgs/sec), preventing 429 Too Many Requests
+            await asyncio.sleep(0.04) 
             
         except Exception as e:
             failed_count += 1
