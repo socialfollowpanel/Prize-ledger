@@ -41,7 +41,7 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = No
 
 async def send_telegram_photo(chat_id: int, photo_id: str, caption: str = None, reply_markup: dict = None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    payload = {"chat_id": chat_id, "photo": photo_id, "parse_mode": "HTML"} # Default to HTML now
+    payload = {"chat_id": chat_id, "photo": photo_id, "parse_mode": "Markdown"}
     if caption:
         payload["caption"] = caption
     if reply_markup:
@@ -75,70 +75,53 @@ def get_season_status():
     now = datetime.now(timezone.utc)
     return season["is_active"] and now < end_date
 
-def get_ordinal(n):
-    if 11 <= (n % 100) <= 13:
-        suffix = 'th'
-    else:
-        suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')
-    return f"{n}{suffix}"
-
 # --- AI BROADCAST LOGIC ---
 
 async def generate_ai_broadcast_message(season_name: str, days_remaining: int):
-    # Updated Prompt for Structured, HTML-formatted messages
-    prompt = f"""You are a professional Community Manager for a Telegram contest called "{season_name}".
+    emoji_pool = ["🚀", "⏳", "🔥", "🎯", "💰", "📈", "⚡", "🏆", "🔔", "🎁"]
+    selected_emojis = ", ".join(random.sample(emoji_pool, k=random.randint(2, 4)))
     
-    Context:
-    - Days remaining: {days_remaining}
-    - Goal: Motivate users to invite friends to win prizes.
-    
-    INSTRUCTIONS:
-    1. Write a broadcast message in strictly **HTML format** (<b>, <i>, <u>).
-    2. Do NOT use Markdown (no **, no __).
-    3. Follow this EXACT structure:
-       
-       [Line 1]: A catchy Headline with emojis (e.g., ⏳ <b>Season 2 – Final Countdown</b> ⏳)
-       [Line 2]: A sentence about time remaining (e.g., Only <b>{days_remaining} days remaining</b>...)
-       
-       [Block 3]: A Warning block using ⚠️ emoji.
-       - Remind them they must remain in the group.
-       - Warn that leaving causes loss of referrals/disqualification.
-       
-       [Block 4]: Momentum update (📈).
-       - Mention leaderboard positions are changing.
-       - Every referral counts.
-       
-       [Block 5]: Action items (💡). Use a list format:
-       - Stay active
-       - Keep inviting real users
-       - Finish strong
-       
-       [Line 6]: Closing statement about locked rankings and rewards 💰.
-       [Line 7]: Final short call to action (🔥).
-
-    4. Make the tone urgent, professional, yet exciting.
-    5. Do NOT include any links (buttons are added separately).
-    6. Return ONLY the HTML message string.
-    """
+    prompt = f"""You are generating a Telegram broadcast message.
+Context:
+- Campaign name: "{season_name}"
+- Giveaway ends in {days_remaining} days
+- Use the following emojis: {selected_emojis}
+- Audience: Telegram users and groups
+- Goal: Urge users to invite friends and climb the leaderboard
+- Message must be UNIQUE every time
+- Do NOT repeat sentence structures from past messages
+- Message must be short, confident, and professional
+- Do NOT include links
+- Do NOT use hashtags
+- Do NOT sound promotional or scammy
+- Use Telegram HTML formatting ONLY (<b>, <i>)
+- Emojis must be naturally placed
+- Do NOT mention AI or automation
+Output:
+Return ONLY the message content in HTML."""
 
     for _ in range(3): # Try up to 3 times to get a unique message
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        message_text = response.text.strip()
-        
-        # Duplicate Prevention check
-        message_hash = hashlib.sha256(message_text.encode()).hexdigest()
-        existing = supabase.table("ai_messages_log").select("id").eq("message_hash", message_hash).execute()
-        
-        if not existing.data:
-            # Save hash and return
-            supabase.table("ai_messages_log").insert({
-                "season_id": season_name,
-                "message_hash": message_hash
-            }).execute()
-            return message_text
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
+            message_text = response.text.strip()
+            
+            # Duplicate Prevention check
+            message_hash = hashlib.sha256(message_text.encode()).hexdigest()
+            existing = supabase.table("ai_messages_log").select("id").eq("message_hash", message_hash).execute()
+            
+            if not existing.data:
+                # Save hash and return
+                supabase.table("ai_messages_log").insert({
+                    "season_id": season_name,
+                    "message_hash": message_hash
+                }).execute()
+                return message_text
+        except Exception as e:
+            print(f"AI Gen Error: {e}")
+            continue
             
     return None
 
@@ -156,22 +139,47 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
     # 2. Generate AI Message
     broadcast_html = await generate_ai_broadcast_message(season["season_name"], days_remaining)
     if not broadcast_html:
-        return {"status": "Failed to generate unique message"}
+        # Fallback if AI fails
+        broadcast_html = f"🚀 <b>{CURRENT_SEASON} Update!</b>\n\nOnly {days_remaining} days left! Keep inviting friends to climb the leaderboard!"
 
-    # 3. Determine Targets
+    # 3. Determine Targets (UPDATED: Fix for fetching all users)
     targets = []
+    
     if BROADCAST_MODE in ["users", "both"]:
-        users = supabase.table("users").select("user_id").eq("is_active", True).execute()
-        targets.extend([u["user_id"] for u in users.data])
+        # Fetch users in chunks to bypass 1000 row limit
+        offset = 0
+        limit = 1000
+        while True:
+            # Range is inclusive
+            users_batch = supabase.table("users").select("user_id").eq("is_active", True).range(offset, offset + limit - 1).execute()
+            if not users_batch.data:
+                break
+            targets.extend([u["user_id"] for u in users_batch.data])
+            if len(users_batch.data) < limit:
+                break
+            offset += limit
         
     if BROADCAST_MODE in ["groups", "both"]:
-        groups = supabase.table("bot_groups").select("chat_id").eq("is_admin", True).eq("is_active", True).execute()
-        targets.extend([g["chat_id"] for g in groups.data])
+        # Fetch groups in chunks
+        offset = 0
+        limit = 1000
+        while True:
+            groups_batch = supabase.table("bot_groups").select("chat_id").eq("is_admin", True).eq("is_active", True).range(offset, offset + limit - 1).execute()
+            if not groups_batch.data:
+                break
+            targets.extend([g["chat_id"] for g in groups_batch.data])
+            if len(groups_batch.data) < limit:
+                break
+            offset += limit
 
-    # 4. Execute Sending (Background)
-    background_tasks.add_task(run_broadcast_batch, targets, broadcast_html)
+    # 4. Execute Sending (UPDATED: Batched Tasks)
+    # Split targets into smaller batches (e.g., 200) to prevent timeouts
+    BATCH_SIZE = 200
+    for i in range(0, len(targets), BATCH_SIZE):
+        batch_targets = targets[i:i + BATCH_SIZE]
+        background_tasks.add_task(run_broadcast_batch, batch_targets, broadcast_html)
     
-    return {"status": "Broadcast started", "target_count": len(targets)}
+    return {"status": "Broadcast queued", "target_count": len(targets), "message_preview": broadcast_html[:50]}
 
 async def run_broadcast_batch(targets, text):
     for chat_id in targets:
@@ -185,7 +193,9 @@ async def run_broadcast_batch(targets, text):
                         supabase.table("users").update({"is_active": False}).eq("user_id", chat_id).execute()
                     else: # Group
                         supabase.table("bot_groups").update({"is_active": False}).eq("chat_id", chat_id).execute()
-            await asyncio.sleep(0.05) # Rate limiting
+            
+            # Slight delay to prevent hitting 30 messages/sec limit
+            await asyncio.sleep(0.04) 
         except Exception:
             continue
 
@@ -288,8 +298,18 @@ async def execute_broadcast(admin_id: int):
     if not state or state["step"] != "confirming": return
     data = state["data"]
     bc_type = state.get("type")
-    users = supabase.table("users").select("user_id").execute()
-    user_list = [u["user_id"] for u in users.data]
+    
+    # UPDATED: Pagination for Manual Broadcast too
+    user_list = []
+    offset = 0
+    limit = 1000
+    while True:
+        users = supabase.table("users").select("user_id").range(offset, offset + limit - 1).execute()
+        if not users.data: break
+        user_list.extend([u["user_id"] for u in users.data])
+        if len(users.data) < limit: break
+        offset += limit
+
     await send_telegram_message(admin_id, f"🚀 Starting broadcast to {len(user_list)} users...")
     success_count = 0
     for uid in user_list:
@@ -299,7 +319,7 @@ async def execute_broadcast(admin_id: int):
             else:
                 await send_telegram_message(uid, data["text"], data["markup"])
             success_count += 1
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.04)
         except Exception: continue
     await send_telegram_message(admin_id, f"✅ Broadcast Complete!\n\nSent: {success_count}")
     del broadcast_state[admin_id]
@@ -379,7 +399,6 @@ async def handle_stats_request(chat_id: int, request_type: str):
             
             name = u.get("username", "Unknown") or "Unknown"
             name = name.replace("<", "&lt;").replace(">", "&gt;")
-            
             user_link = f"<a href='tg://user?id={u['user_id']}'>{name}</a>"
             
             board_lines.append(f"{prefix} {user_link} : <b>{u['valid_referrals']}</b>")
@@ -392,29 +411,7 @@ async def handle_stats_request(chat_id: int, request_type: str):
         if user.data:
             u = user.data[0]
             status = "✅ Active" if u['is_participating'] else "❌ Inactive"
-            
-            # --- RANK CALCULATION UPDATE ---
-            # 1. Get total active participants
-            total_query = supabase.table("users").select("user_id", count="exact").eq("is_participating", True).eq("season", CURRENT_SEASON).execute()
-            total_participants = total_query.count
-            
-            # 2. Get number of users with MORE referrals than current user (To find rank)
-            my_refs = u['valid_referrals']
-            better_query = supabase.table("users").select("user_id", count="exact").eq("is_participating", True).eq("season", CURRENT_SEASON).gt("valid_referrals", my_refs).execute()
-            # Rank = (people with more points) + 1
-            my_rank = better_query.count + 1
-            
-            rank_str = f"#{get_ordinal(my_rank)} rank out of {total_participants}"
-            
-            msg = (
-                f"📊 <b>My Stats</b>\n\n"
-                f"👤 <b>Status:</b> {status}\n"
-                f"🤝 <b>Referrals:</b> {u['valid_referrals']}\n"
-                f"🏅 <b>Rank:</b> {rank_str}\n"
-                f"📅 <b>Season:</b> {u['season']}"
-            )
-            
-            await send_telegram_message(chat_id, msg, parse_mode="HTML")
+            await send_telegram_message(chat_id, f"📊 *My Stats*\n\nStatus: {status}\nReferrals: {u['valid_referrals']}\nSeason: {u['season']}")
 
 # --- API Endpoints ---
 @app.post("/webhook")
@@ -481,14 +478,12 @@ async def validate_users_cron(background_tasks: BackgroundTasks):
     users = supabase.table("users").select("user_id, referred_by").eq("is_participating", True).limit(50).execute()
     for user in users.data:
         if not await check_membership(user["user_id"]):
-            # DB Updates: Mark inactive and decrease referral count
             supabase.table("users").update({"is_participating": False}).eq("user_id", user["user_id"]).execute()
             if user["referred_by"]:
                 ref_data = supabase.table("users").select("valid_referrals").eq("user_id", user["referred_by"]).execute()
                 if ref_data.data and ref_data.data[0]["valid_referrals"] > 0:
                     supabase.table("users").update({"valid_referrals": ref_data.data[0]["valid_referrals"] - 1}).eq("user_id", user["referred_by"]).execute()
             
-            # Send Notification Message
             msg = f"❌ <b>You are no longer participating in {CURRENT_SEASON}</b>\n\n<b>Reason:</b> You left the required channel.\n\nJoin back and participate again — everything will come back!"
             background_tasks.add_task(send_telegram_message, user["user_id"], msg, None, "HTML")
 
