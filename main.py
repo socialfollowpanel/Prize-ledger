@@ -142,11 +142,10 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
         # Fallback if AI fails
         broadcast_html = f"🚀 <b>{CURRENT_SEASON} Update!</b>\n\nOnly {days_remaining} days left! Keep inviting friends to climb the leaderboard!"
 
-    # 3. Determine Targets (UPDATED: Fix for fetching all users)
+    # 3. Determine Targets (UPDATED: Fix to fetch ALL users using pagination)
     targets = []
     
     if BROADCAST_MODE in ["users", "both"]:
-        # Fetch users in chunks to bypass 1000 row limit
         offset = 0
         limit = 1000
         while True:
@@ -160,7 +159,6 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
             offset += limit
         
     if BROADCAST_MODE in ["groups", "both"]:
-        # Fetch groups in chunks
         offset = 0
         limit = 1000
         while True:
@@ -172,14 +170,14 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
                 break
             offset += limit
 
-    # 4. Execute Sending (UPDATED: Batched Tasks)
-    # Split targets into smaller batches (e.g., 200) to prevent timeouts
+    # 4. Execute Sending (UPDATED: Batched Tasks to prevent timeout)
+    # Process targets in chunks of 200
     BATCH_SIZE = 200
     for i in range(0, len(targets), BATCH_SIZE):
-        batch_targets = targets[i:i + BATCH_SIZE]
-        background_tasks.add_task(run_broadcast_batch, batch_targets, broadcast_html)
+        chunk = targets[i:i + BATCH_SIZE]
+        background_tasks.add_task(run_broadcast_batch, chunk, broadcast_html)
     
-    return {"status": "Broadcast queued", "target_count": len(targets), "message_preview": broadcast_html[:50]}
+    return {"status": "Broadcast started", "target_count": len(targets)}
 
 async def run_broadcast_batch(targets, text):
     for chat_id in targets:
@@ -194,7 +192,7 @@ async def run_broadcast_batch(targets, text):
                     else: # Group
                         supabase.table("bot_groups").update({"is_active": False}).eq("chat_id", chat_id).execute()
             
-            # Slight delay to prevent hitting 30 messages/sec limit
+            # Rate limiting delay
             await asyncio.sleep(0.04) 
         except Exception:
             continue
@@ -299,7 +297,7 @@ async def execute_broadcast(admin_id: int):
     data = state["data"]
     bc_type = state.get("type")
     
-    # UPDATED: Pagination for Manual Broadcast too
+    # UPDATED: Pagination for Manual Broadcast to ensure all users are reached
     user_list = []
     offset = 0
     limit = 1000
