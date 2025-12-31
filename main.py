@@ -7,11 +7,11 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from supabase import create_client, Client
 from pydantic import BaseModel
-from google import genai 
+from google import genai
 
 # --- Configuration ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") # Ensure this is the SERVICE_ROLE KEY, not Anon key
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_ID = os.getenv("REQUIRED_CHANNEL_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -142,15 +142,18 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
         # Fallback if AI fails
         broadcast_html = f"🚀 <b>{CURRENT_SEASON} Update!</b>\n\nOnly {days_remaining} days left! Keep inviting friends to climb the leaderboard!"
 
-    # 3. Determine Targets (UPDATED: Fix to fetch ALL users using pagination)
+    # 3. Determine Targets (UPDATED: Fixed Filter and Pagination)
     targets = []
     
     if BROADCAST_MODE in ["users", "both"]:
+        # Fetch users in chunks
         offset = 0
         limit = 1000
         while True:
-            # Range is inclusive
-            users_batch = supabase.table("users").select("user_id").eq("is_active", True).range(offset, offset + limit - 1).execute()
+            # UPDATED: Removed strict .eq("is_active", True) to ensure we find users even if status is NULL
+            # We use .neq("is_active", False) to exclude only definitely banned users.
+            users_batch = supabase.table("users").select("user_id").neq("is_active", False).range(offset, offset + limit - 1).execute()
+            
             if not users_batch.data:
                 break
             targets.extend([u["user_id"] for u in users_batch.data])
@@ -159,6 +162,7 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
             offset += limit
         
     if BROADCAST_MODE in ["groups", "both"]:
+        # Fetch groups in chunks
         offset = 0
         limit = 1000
         while True:
@@ -170,14 +174,13 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
                 break
             offset += limit
 
-    # 4. Execute Sending (UPDATED: Batched Tasks to prevent timeout)
-    # Process targets in chunks of 200
+    # 4. Execute Sending (Batched Tasks)
     BATCH_SIZE = 200
     for i in range(0, len(targets), BATCH_SIZE):
-        chunk = targets[i:i + BATCH_SIZE]
-        background_tasks.add_task(run_broadcast_batch, chunk, broadcast_html)
+        batch_targets = targets[i:i + BATCH_SIZE]
+        background_tasks.add_task(run_broadcast_batch, batch_targets, broadcast_html)
     
-    return {"status": "Broadcast started", "target_count": len(targets)}
+    return {"status": "Broadcast started", "target_count": len(targets), "message_preview": broadcast_html[:50]}
 
 async def run_broadcast_batch(targets, text):
     for chat_id in targets:
@@ -192,7 +195,7 @@ async def run_broadcast_batch(targets, text):
                     else: # Group
                         supabase.table("bot_groups").update({"is_active": False}).eq("chat_id", chat_id).execute()
             
-            # Rate limiting delay
+            # Slight delay to prevent hitting limits
             await asyncio.sleep(0.04) 
         except Exception:
             continue
@@ -227,7 +230,6 @@ def get_confirm_broadcast_keyboard():
 
 def get_share_button(ref_link):
     share_text = f"Join {CURRENT_SEASON} and win big prizes! 🚀"
-    # Create the telegram share url
     share_url = f"https://t.me/share/url?url={ref_link}&text={share_text}"
     return {
         "inline_keyboard": [
@@ -235,7 +237,7 @@ def get_share_button(ref_link):
         ]
     }
 
-# --- Manual Broadcast Logic (Preserved) ---
+# --- Manual Broadcast Logic ---
 async def handle_broadcast_command(chat_id: int):
     if chat_id != ADMIN_ID:
         return
@@ -297,7 +299,7 @@ async def execute_broadcast(admin_id: int):
     data = state["data"]
     bc_type = state.get("type")
     
-    # UPDATED: Pagination for Manual Broadcast to ensure all users are reached
+    # Manual Broadcast Pagination
     user_list = []
     offset = 0
     limit = 1000
