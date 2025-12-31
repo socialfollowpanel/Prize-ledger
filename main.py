@@ -85,38 +85,27 @@ def get_ordinal(n):
 # --- AI BROADCAST LOGIC ---
 
 async def generate_ai_broadcast_message(season_name: str, days_remaining: int):
-    # Updated Prompt for structured HTML output
-    prompt = f"""You are a Telegram Community Manager. Generate a structured update message for "{season_name}".
+    # UPDATED PROMPT: Removed rigid emojis/brackets to fix duplication error
+    prompt = f"""You are a Telegram Community Manager writing a broadcast for "{season_name}".
     
     Context:
-    - Days Remaining: {days_remaining}
-    - Goal: Urge users to remain active and keep inviting to improve their rank.
+    - Time Remaining: {days_remaining} days.
+    - Goal: Motivate users to invite friends and check the leaderboard.
     
-    Format Requirements:
-    1. Use HTML formatting ONLY (<b>bold</b>, <i>italic</i>, <u>underline</u>). Do NOT use Markdown.
-    2. Structure the message exactly like this (fill in the content creatively but keep the sections):
-       
-       ⏳ <b>{season_name} – Final Countdown</b> ⏳
-       
-       [Brief punchy line about only <b>{days_remaining} days remaining</b>]
-       
-       ⚠️ Important reminder:
-       Participants must <b>remain in the group</b> until the season closes.
-       [Sentence about consequence: loss of referrals/account marked inactive ❌]
-       
-       📈 Leaderboard positions are still changing.
-       [Sentence about how every referral counts and rankings can shift]
-       
-       💡 Stay active
-       👥 Keep inviting real users
-       🏁 Finish strong
-       
-       [Closing sentence: Rankings lock when countdown ends 💰]
-       [Final push slogan 🔥]
-
-    3. Ensure the tone is urgent but professional.
-    4. Do not include links.
-    5. Output ONLY the raw HTML message string.
+    Instructions:
+    1. Write a short, high-energy update using HTML tags (<b>, <i>, <u>) ONLY.
+    2. Do NOT use Markdown.
+    3. Include these 5 distinct sections (do not label them, just write them):
+       - A catchy Headline about the countdown (Make it bold).
+       - A punchy sentence stating exactly {days_remaining} days remain.
+       - A Warning: Remind users that leaving the group voids their prize (Use an emoji like ⚠️ or ❌).
+       - A Leaderboard Note: Mention that rankings are still shifting and every invite counts.
+       - A Call to Action list (Stay active, Invite, Finish strong).
+    
+    4. VARY your wording, sentence structure, and emoji choices every time you generate this.
+    5. Do NOT use placeholder text or brackets.
+    6. Do NOT include links.
+    7. Output ONLY the raw HTML string.
     """
 
     for _ in range(3): # Try up to 3 times to get a unique message
@@ -391,7 +380,7 @@ async def handle_stats_request(chat_id: int, request_type: str):
             u = user.data[0]
             status = "✅ Active" if u['is_participating'] else "❌ Inactive"
             
-            # --- RANK CALCULATION UPDATE ---
+            # --- RANK CALCULATION ---
             # 1. Get Total Participants Count
             total_query = supabase.table("users").select("user_id", count="exact").eq("is_participating", True).eq("season", CURRENT_SEASON).execute()
             total_participants = total_query.count
