@@ -159,6 +159,35 @@ async def generate_ai_broadcast_message(season_name: str, days_remaining: int):
             
     return None
 
+def fetch_all_targets(table_name, select_col, filters=None):
+    """Helper to fetch ALL rows from Supabase using pagination (avoids 1000 row limit)"""
+    all_items = []
+    offset = 0
+    limit = 1000 # Fetch in chunks of 1000
+    
+    while True:
+        query = supabase.table(table_name).select(select_col)
+        
+        if filters:
+            for key, value in filters.items():
+                query = query.eq(key, value)
+                
+        # Use range for pagination
+        response = query.range(offset, offset + limit - 1).execute()
+        data = response.data
+        
+        if not data:
+            break
+            
+        all_items.extend([item[select_col] for item in data])
+        
+        if len(data) < limit:
+            break
+            
+        offset += limit
+        
+    return all_items
+
 @app.get("/cron/season-broadcast")
 async def cron_season_broadcast(background_tasks: BackgroundTasks):
     """Send AI-generated broadcast to all users and groups"""
@@ -176,19 +205,24 @@ async def cron_season_broadcast(background_tasks: BackgroundTasks):
     if not broadcast_text:
         return {"status": "Failed to generate unique message"}
 
-    # 3. Determine Targets
+    # 3. Determine Targets with PAGINATION to ensure ALL users are fetched
     targets = []
+    
     if BROADCAST_MODE in ["users", "both"]:
-        users = supabase.table("users").select("user_id").eq("is_active", True).execute()
-        targets.extend([u["user_id"] for u in users.data])
+        # Fetch ALL users where is_active is True
+        user_ids = fetch_all_targets("users", "user_id", {"is_active": True})
+        targets.extend(user_ids)
         
     if BROADCAST_MODE in ["groups", "both"]:
-        groups = supabase.table("bot_groups").select("chat_id").eq("is_admin", True).eq("is_active", True).execute()
-        targets.extend([g["chat_id"] for g in groups.data])
+        # Fetch ALL groups where is_admin and is_active are True
+        group_ids = fetch_all_targets("bot_groups", "chat_id", {"is_admin": True, "is_active": True})
+        targets.extend(group_ids)
 
     # 4. Execute Sending (Background)
     # The message is sent without preview, directly to the background task
     if targets:
+        # Remove duplicates just in case
+        targets = list(set(targets))
         background_tasks.add_task(run_broadcast_batch, targets, broadcast_text)
         return {"status": "Broadcast initiated", "target_count": len(targets)}
     else:
@@ -199,6 +233,8 @@ async def run_broadcast_batch(targets, text):
     success_count = 0
     failed_count = 0
     blocked_count = 0
+    
+    print(f"Starting broadcast to {len(targets)} targets...")
     
     for chat_id in targets:
         try:
@@ -335,8 +371,10 @@ async def execute_broadcast(admin_id: int):
     if not state or state["step"] != "confirming": return
     data = state["data"]
     bc_type = state.get("type")
-    users = supabase.table("users").select("user_id").execute()
-    user_list = [u["user_id"] for u in users.data]
+    
+    # Updated: Fetch all users for manual broadcast too
+    user_list = fetch_all_targets("users", "user_id")
+    
     await send_telegram_message(admin_id, f"🚀 Starting broadcast to {len(user_list)} users...")
     success_count = 0
     for uid in user_list:
