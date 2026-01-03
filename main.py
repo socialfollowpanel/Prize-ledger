@@ -277,7 +277,7 @@ def get_main_menu_keyboard():
     return {
         "keyboard": [
             [{"text": "✅ My Referrals"}, {"text": "🏆 Leaderboard"}],
-            [{"text": "📊 My Stats"}]
+            [{"text": "📊 My Stats"}, {"text": "💸 Withdraw"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -527,6 +527,45 @@ async def handle_stats_request(chat_id: int, request_type: str):
             )
             await send_telegram_message(chat_id, msg, parse_mode="HTML")
 
+# --- Withdrawal Handler (NEW) ---
+async def handle_withdrawal_click(chat_id: int):
+    """Handles the withdrawal button click with a dynamic countdown"""
+    
+    # 1. Fetch Season Data to get the End Date
+    response = supabase.table("seasons").select("*").eq("season_name", CURRENT_SEASON).execute()
+    
+    days_text = "soon" # Default fallback
+    
+    if response.data:
+        season = response.data[0]
+        end_date = datetime.fromisoformat(season["end_date"].replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        
+        # Calculate difference
+        remaining = end_date - now
+        
+        if remaining.days > 0:
+            days_text = f"{remaining.days} days"
+        elif remaining.days == 0:
+            days_text = "less than 24 hours"
+        else:
+            days_text = "very soon"
+
+    # 2. Professional Message with Red Alert Style
+    message = f"""🔴 <b>WITHDRAWAL GATEWAY LOCKED</b> 🔴
+
+The withdrawal functionality is currently <b>disabled</b> for security verification.
+
+⏳ <b>Time Remaining:</b>
+The portal is scheduled to open in approximately <b>{days_text}</b>.
+
+⚠️ <b>Notice:</b>
+The system is currently finalizing the referral validation process. Any attempt to use fake referrals will result in immediate disqualification.
+
+Please wait for the official announcement in the channel."""
+
+    await send_telegram_message(chat_id, message, parse_mode="HTML")
+
 # --- API Endpoints ---
 @app.post("/webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -593,6 +632,8 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(handle_stats_request, chat_id, "leaderboard")
         elif text == "📊 My Stats": 
             background_tasks.add_task(handle_stats_request, chat_id, "stats")
+        elif text == "💸 Withdraw": # <--- NEW HANDLER TRIGGER
+            background_tasks.add_task(handle_withdrawal_click, chat_id)
     
     return {"status": "ok"}
 
