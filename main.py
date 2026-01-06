@@ -46,13 +46,18 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict = No
         resp = await client.post(url, json=payload)
         return resp.json()
 
-async def send_telegram_photo(chat_id: int, photo_id: str, caption: str = None, reply_markup: dict = None):
+async def send_telegram_photo(chat_id: int, photo_id: str, caption: str = None, reply_markup: dict = None, parse_mode: str = "Markdown"):
+    # UPDATED: Added parse_mode argument to support links in captions
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    payload = {"chat_id": chat_id, "photo": photo_id, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "photo": photo_id}
+    
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     if caption:
         payload["caption"] = caption
     if reply_markup:
         payload["reply_markup"] = reply_markup
+        
     async with httpx.AsyncClient() as client:
         await client.post(url, json=payload)
 
@@ -310,7 +315,7 @@ def get_share_button(ref_link):
         ]
     }
 
-# --- Manual Broadcast Logic (Preserved) ---
+# --- Manual Broadcast Logic (Preserved & Updated) ---
 async def handle_broadcast_command(chat_id: int):
     if chat_id != ADMIN_ID:
         return
@@ -328,12 +333,15 @@ async def process_broadcast_step(chat_id: int, text: str = None, photo_id: str =
             return
         state["data"]["photo_id"] = photo_id
         state["step"] = "waiting_for_caption"
-        await send_telegram_message(chat_id, "📸 Photo received.\n\nNow send the **Caption**.")
+        # UPDATED: Instruct user they can use Markdown links in the caption
+        await send_telegram_message(chat_id, "📸 Photo received.\n\nNow send the **Caption**.\n\n💡 *Tip:* You can use `[Link Text](URL)` to add links inside the caption, and add a line button at the end like: `Button | URL`.")
     
     elif step == "waiting_for_caption":
         caption = text if text and text.lower() != "skip" else ""
         button = None
-        if caption and "|" in caption.splitlines()[-1]:
+        
+        # Check for button line at the bottom
+        if caption and len(caption.splitlines()) > 0 and "|" in caption.splitlines()[-1]:
             lines = caption.splitlines()
             btn_line = lines.pop()
             btn_text, btn_url = btn_line.split("|", 1)
@@ -344,7 +352,8 @@ async def process_broadcast_step(chat_id: int, text: str = None, photo_id: str =
         state["data"]["markup"] = button
         state["step"] = "confirming"
         await send_telegram_message(chat_id, "👀 *Preview:*")
-        await send_telegram_photo(chat_id, state["data"]["photo_id"], caption, button)
+        # Ensure parse_mode is passed as Markdown so links work
+        await send_telegram_photo(chat_id, state["data"]["photo_id"], caption, button, parse_mode="Markdown")
         await send_telegram_message(chat_id, "Do you want to send this broadcast?", get_confirm_broadcast_keyboard())
 
     elif step == "waiting_for_text":
@@ -353,17 +362,20 @@ async def process_broadcast_step(chat_id: int, text: str = None, photo_id: str =
             return
         button = None
         msg_text = text
-        if "|" in text.splitlines()[-1]:
+        
+        # Check for button line at the bottom
+        if len(text.splitlines()) > 0 and "|" in text.splitlines()[-1]:
             lines = text.splitlines()
             btn_line = lines.pop()
             btn_text, btn_url = btn_line.split("|", 1)
             button = {"inline_keyboard": [[{"text": btn_text.strip(), "url": btn_url.strip()}]]}
             msg_text = "\n".join(lines).strip()
+            
         state["data"]["text"] = msg_text
         state["data"]["markup"] = button
         state["step"] = "confirming"
         await send_telegram_message(chat_id, "👀 *Preview:*")
-        await send_telegram_message(chat_id, msg_text, button)
+        await send_telegram_message(chat_id, msg_text, button, parse_mode="Markdown")
         await send_telegram_message(chat_id, "Do you want to send this broadcast?", get_confirm_broadcast_keyboard())
 
 async def execute_broadcast(admin_id: int):
@@ -380,9 +392,11 @@ async def execute_broadcast(admin_id: int):
     for uid in user_list:
         try:
             if bc_type == "photo":
-                await send_telegram_photo(uid, data["photo_id"], data["caption"], data["markup"])
+                # UPDATED: Sending with parse_mode="Markdown" ensures links inside caption work
+                await send_telegram_photo(uid, data["photo_id"], data["caption"], data["markup"], parse_mode="Markdown")
             else:
-                await send_telegram_message(uid, data["text"], data["markup"])
+                # UPDATED: Sending with parse_mode="Markdown" ensures links inside text work
+                await send_telegram_message(uid, data["text"], data["markup"], parse_mode="Markdown")
             success_count += 1
             await asyncio.sleep(0.05)
         except Exception: continue
@@ -593,7 +607,8 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             await send_telegram_message(chat_id, "📸 Send the PHOTO now.")
         elif data_cb == "bc_type_text":
             broadcast_state[chat_id].update({"step": "waiting_for_text", "type": "text"})
-            await send_telegram_message(chat_id, "📝 Send the MESSAGE TEXT now.")
+            # UPDATED: Instruct user about link format
+            await send_telegram_message(chat_id, "📝 Send the MESSAGE TEXT now.\n\n💡 *Tip:* You can use `[Link Text](URL)` to add links inside the text, and add a line button at the end like: `Button | URL`.")
         elif data_cb == "bc_confirm_send":
             background_tasks.add_task(execute_broadcast, chat_id)
             await send_telegram_message(chat_id, "⏳ Sending broadcast...")
@@ -632,7 +647,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(handle_stats_request, chat_id, "leaderboard")
         elif text == "📊 My Stats": 
             background_tasks.add_task(handle_stats_request, chat_id, "stats")
-        elif text == "💸 Withdraw": # <--- NEW HANDLER TRIGGER
+        elif text == "💸 Withdraw": 
             background_tasks.add_task(handle_withdrawal_click, chat_id)
     
     return {"status": "ok"}
